@@ -1,0 +1,150 @@
+name: PulsePro Auto-Update & APK
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy-pages:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare Auto-Update Web Files
+        run: |
+          ZIPFILE=$(ls *.zip | head -n 1)
+          unzip -o "$ZIPFILE" -d app_src
+          if [ ! -f app_src/package.json ]; then
+            SUB=$(find app_src -maxdepth 2 -name package.json -exec dirname {} \; | head -n 1)
+            cp -r "$SUB"/. app_src/
+          fi
+          cat << 'SWEOF' > app_src/www/sw.js
+          const CACHE = 'pulsepro-auto-v1';
+          self.addEventListener('install', e => { self.skipWaiting(); });
+          self.addEventListener('activate', e => { e.waitUntil(self.clients.claim()); });
+          self.addEventListener('fetch', e => {
+            if (e.request.method !== 'GET') return;
+            e.respondWith(
+              fetch(e.request).then(res => {
+                const clone = res.clone();
+                caches.open(CACHE).then(c => c.put(e.request, clone));
+                return res;
+              }).catch(() => caches.match(e.request).then(r => r || caches.match('./index.html')))
+            );
+          });
+          SWEOF
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: app_src/www
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  build-apk:
+    runs-on: ubuntu-latest
+    needs: deploy-pages
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - name: Setup Auto-Updating Capacitor APK
+        run: |
+          ZIPFILE=$(ls *.zip | head -n 1)
+          unzip -o "$ZIPFILE" -d app_src
+          if [ ! -f app_src/package.json ]; then
+            SUB=$(find app_src -maxdepth 2 -name package.json -exec dirname {} \; | head -n 1)
+            cp -r "$SUB"/. app_src/
+          fi
+          cd app_src
+          python3 - << 'PYEOF'
+          import json
+          cfg = json.load(open('capacitor.config.json', encoding='utf-8'))
+          cfg['server'] = {
+              'url': 'https://vihangarasanjanawithanage39-hash.github.io/Pulseproapp/',
+              'cleartext': False
+          }
+          json.dump(cfg, open('capacitor.config.json', 'w', encoding='utf-8'), indent=2)
+          PYEOF
+          npm install
+          npx cap add android
+          npx cap sync android
+          python3 - << 'PYEOF'
+          import os, shutil
+          mf_path = 'android/app/src/main/AndroidManifest.xml'
+          mf = open(mf_path, encoding='utf-8').read()
+          perms = '''
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-permission android:name="android.permission.FLASHLIGHT" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-feature android:name="android.hardware.camera" android:required="false" />
+              <uses-feature android:name="android.hardware.camera.flash" android:required="false" />
+          '''
+          if 'android.permission.CAMERA' not in mf:
+              mf = mf.replace('<application', perms + '\n    <application', 1)
+          open(mf_path, 'w', encoding='utf-8').write(mf)
+          java_code = '''package com.pulsepro.studio;
+          import android.Manifest;
+          import android.content.pm.PackageManager;
+          import android.os.Bundle;
+          import android.webkit.PermissionRequest;
+          import android.webkit.WebChromeClient;
+          import androidx.core.app.ActivityCompat;
+          import androidx.core.content.ContextCompat;
+          import com.getcapacitor.BridgeActivity;
+          public class MainActivity extends BridgeActivity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                      ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.CAMERA}, 1001);
+                  }
+              }
+              @Override
+              public void onStart() {
+                  super.onStart();
+                  if (this.bridge != null && this.bridge.getWebView() != null) {
+                      this.bridge.getWebView().setWebChromeClient(new WebChromeClient() {
+                          @Override
+                          public void onPermissionRequest(final PermissionRequest request) {
+                              runOnUiThread(() -> request.grant(request.getResources()));
+                          }
+                      });
+                  }
+              }
+          }'''
+          open('android/app/src/main/java/com/pulsepro/studio/MainActivity.java', 'w', encoding='utf-8').write(java_code)
+          res = 'android/app/src/main/res'
+          for d in os.listdir(res):
+              if d.startswith('mipmap-') and not d.startswith('mipmap-anydpi'):
+                  for t in ['ic_launcher.png', 'ic_launcher_round.png', 'ic_launcher_foreground.png']:
+                      p = os.path.join(res, d, t)
+                      if os.path.exists(p): shutil.copy2('www/icon-512.png', p)
+          anydpi = os.path.join(res, 'mipmap-anydpi-v26')
+          if os.path.isdir(anydpi): shutil.rmtree(anydpi)
+          PYEOF
+      - name: Build Signed PulsePro.apk
+        run: |
+          cd app_src/android
+          chmod +x gradlew
+          ./gradlew assembleRelease
+          keytool -genkeypair -v -keystore pulsepro.keystore -alias pulsepro -keyalg RSA -keysize 2048 -validity 10000 -storepass pulsepro2026 -keypass pulsepro2026 -dname "CN=PulsePro, O=PulsePro, C=LK"
+          BT=$(ls -d "$ANDROID_HOME/build-tools/"* | sort -V | tail -n 1)
+          "$BT/zipalign" -v -p 4 app/build/outputs/apk/release/app-release-unsigned.apk app/build/outputs/apk/release/PulsePro-aligned.apk
+          "$BT/apksigner" sign --ks pulsepro.keystore --ks-key-alias pulsepro --ks-pass pass:pulsepro2026 --key-pass pass:pulsepro2026 --out app/build/outputs/apk/release/PulsePro.apk app/build/outputs/apk/release/PulsePro-aligned.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PulsePro-APK
+          path: app_src/android/app/build/outputs/apk/release/PulsePro.apk
