@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -23,7 +23,7 @@ jobs:
             cp -r "$SUB"/. app_src/
           fi
           cat << 'SWEOF' > app_src/www/sw.js
-          const CACHE = 'pulsepro-auto-v1';
+          const CACHE = 'pulsepro-auto-v2';
           self.addEventListener('install', e => { self.skipWaiting(); });
           self.addEventListener('activate', e => { e.waitUntil(self.clients.claim()); });
           self.addEventListener('fetch', e => {
@@ -149,7 +149,9 @@ jobs:
           BT=$(ls -d "$ANDROID_HOME/build-tools/"* | sort -V | tail -n 1)
           "$BT/zipalign" -v -p 4 app/build/outputs/apk/release/app-release-unsigned.apk app/build/outputs/apk/release/PulsePro-aligned.apk
           "$BT/apksigner" sign --ks pulsepro.keystore --ks-key-alias pulsepro --ks-pass pass:pulsepro2026 --key-pass pass:pulsepro2026 --out app/build/outputs/apk/release/PulsePro.apk app/build/outputs/apk/release/PulsePro-aligned.apk
-      - uses: actions/upload-artifact@v4
+      - name: Publish Direct APK Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: PulsePro-APK
-          path: app_src/android/app/build/outputs/apk/release/PulsePro.apk
+          tag_name: latest
+          name: PulsePro Android App
+          files: app_src/android/app/build/outputs/apk/release/PulsePro.apk
